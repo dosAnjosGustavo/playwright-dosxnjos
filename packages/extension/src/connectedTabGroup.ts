@@ -25,10 +25,9 @@ export function isNonDebuggableUrl(url: string | undefined): boolean {
   return !!url && NON_DEBUGGABLE_SCHEMES.some(s => url.startsWith(s));
 }
 
-// Who a tab "belongs to" when its connection closes: agent-owned tabs get
-// closed (the agent created them, so leaving them open is a leak); user-owned
-// tabs only get ungrouped (closing a tab the user brought in themselves would
-// be destructive). See ConnectedTabGroup's ownership comment for the rules.
+// Tracks how a tab entered the connection's group. Relay attachment can also
+// classify an existing tab as agent-owned, so ownership never authorizes
+// closing a tab when the connection ends.
 export type TabOwner = 'agent' | 'user';
 
 // Ungroups any Playwright-titled groups left behind by a prior service worker.
@@ -62,10 +61,9 @@ export class ConnectedTabGroup {
   private _groupId: number | null = null;
   private _groupTitle: string;
   private _groupTabIds: Set<number> = new Set();
-  // Tabs to close (vs. just ungroup) when the connection closes. Populated
-  // only in `_onTabGroupChanged`'s entry branch — the single point where a
-  // tab becomes a group member — so a later re-attach (e.g. after navigation)
-  // never re-decides ownership for a tab already in the group.
+  // Agent ownership recorded on group entry, cleared on exit or disconnect.
+  // A later re-attach (e.g. after navigation) never re-decides ownership for
+  // an existing member. Both owners survive a connection closing.
   private _agentOwnedTabs: Set<number> = new Set();
   // Owner intended for the next tab that enters the group via an
   // agent-initiated path (seed tab, or `_addTabToGroup` from a relay attach).
@@ -205,29 +203,20 @@ export class ConnectedTabGroup {
     void this._updateBadge(tabId, { text: '' });
   }
 
-  // Agent-owned tabs (created by the agent — seed via token/newTab, popups,
-  // browser_tabs new, Target.createTarget) are closed: leaving them open would
-  // leak windows every time a Claude instance dies. User-owned tabs (the tab
-  // picked in the connect page, or dragged into the group) are only
-  // ungrouped — the user's own page, closing it would be destructive. Same
-  // path for a manual disconnect (status page) and the connection dying.
+  // Preserve every tab on manual disconnect or connection loss. Even tabs
+  // classified as agent-owned may predate the connection or contain useful
+  // work. Leaving agent-created tabs open is intentional; closing a tab must
+  // remain an explicit, separate action.
   private _onConnectionClose(): void {
     chrome.tabs.onUpdated.removeListener(this._onTabUpdatedListener);
     chrome.tabs.onRemoved.removeListener(this._onTabRemovedListener);
     const groupTabs = [...this._groupTabIds];
-    const agentOwnedTabs = groupTabs.filter(id => this._agentOwnedTabs.has(id));
-    const userOwnedTabs = groupTabs.filter(id => !this._agentOwnedTabs.has(id));
     this._groupTabIds.clear();
     this._agentOwnedTabs.clear();
     this._pendingOwner.clear();
-    if (userOwnedTabs.length) {
-      this._retryOnDrag(() => chrome.tabs.ungroup(userOwnedTabs as [number, ...number[]])).catch(error => {
+    if (groupTabs.length) {
+      this._retryOnDrag(() => chrome.tabs.ungroup(groupTabs as [number, ...number[]])).catch(error => {
         debugLog('Error ungrouping tabs on close:', error);
-      });
-    }
-    if (agentOwnedTabs.length) {
-      this._retryOnDrag(() => chrome.tabs.remove(agentOwnedTabs)).catch(error => {
-        debugLog('Error closing agent-owned tabs on close:', error);
       });
     }
     this.onclose?.();

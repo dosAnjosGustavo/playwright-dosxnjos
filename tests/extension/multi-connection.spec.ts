@@ -173,10 +173,9 @@ test.describe(() => {
     await expect.poll(async () => {
       return sw.evaluate(async () => {
         const chrome = (globalThis as any).chrome;
-        const [tab] = await chrome.tabs.query({ title: 'Title' });
-        return tab?.groupId ?? -1;
+        return (await chrome.tabs.query({ title: 'Title' })).map((tab: chrome.tabs.Tab) => tab.groupId);
       });
-    }).toBe(-1);
+    }).toEqual([-1]);
 
     // B's group survives untouched.
     await expect.poll(async () => {
@@ -217,7 +216,7 @@ test.describe(() => {
     await expect(statusPage.locator('.connection-section', { hasText: 'Agent B' })).toBeVisible();
   });
 
-  test('closing a connection closes its agent-owned tabs but only ungroups the user-owned seed', async ({ browserWithExtension, startClient, server }) => {
+  test('closing a connection preserves and ungroups both agent-owned and user-owned tabs', async ({ browserWithExtension, startClient, server }) => {
     server.setContent('/second', '<title>Second</title><body>Second content</body>', 'text/html');
     const browserContext = await browserWithExtension.launch();
 
@@ -242,37 +241,24 @@ test.describe(() => {
 
     await clientA.close();
 
-    // The agent-created tab is gone.
+    // The agent-created tab survives and leaves the disconnected group.
     await expect.poll(async () => {
       return sw.evaluate(async (targetUrl: string) => {
         const chrome = (globalThis as any).chrome;
-        return (await chrome.tabs.query({ url: targetUrl })).length;
+        return (await chrome.tabs.query({ url: targetUrl })).map((tab: chrome.tabs.Tab) => tab.groupId);
       }, server.PREFIX + '/second');
-    }).toBe(0);
+    }).toEqual([-1]);
 
     // The user-picked seed tab survives, just ungrouped.
     await expect.poll(async () => {
       return sw.evaluate(async () => {
         const chrome = (globalThis as any).chrome;
-        const [tab] = await chrome.tabs.query({ title: 'Title' });
-        return tab?.groupId ?? -1;
+        return (await chrome.tabs.query({ title: 'Title' })).map((tab: chrome.tabs.Tab) => tab.groupId);
       });
-    }).toBe(-1);
+    }).toEqual([-1]);
   });
 
-  test('token-bypass seed tab is agent-owned and closes on disconnect', async ({ browserWithExtension, startClient, server }) => {
-    // KNOWN BUG (16/07 investigation, not yet root-caused): [PWDEBUG] logging
-    // showed _connectTab correctly computing seedOwner: 'agent' for this
-    // path, but by the time _onConnectionClose runs, the tab shows up in
-    // userOwnedTabs instead of agentOwnedTabs — the pending-owner entry set
-    // in ConnectedTabGroup's constructor isn't being consumed by
-    // _onTabGroupChanged for this specific tab. Distinct from the clientName
-    // "unknown" issue that used to affect connectViaToken (that one was fixed
-    // 17/07 - a stale React closure in connect.tsx, see its own comment); this
-    // one is a real gap in this fork's own ownership tracking, scoped to the
-    // token-bypass seed specifically — the picker-seed and mid-session
-    // agent-created-tab cases both pass their equivalent assertions).
-    test.fixme(true, 'seed tab ownership resolves to user instead of agent for the token-bypass path — see comment above');
+  test('token-bypass seed tab survives and is ungrouped on disconnect', async ({ browserWithExtension, startClient, server }) => {
     const browserContext = await browserWithExtension.launch();
 
     const client = await connectViaToken(browserContext, startClient, browserWithExtension, 'Agent A');
@@ -297,8 +283,8 @@ test.describe(() => {
     await expect.poll(async () => {
       return sw.evaluate(async (targetUrl: string) => {
         const chrome = (globalThis as any).chrome;
-        return (await chrome.tabs.query({ url: targetUrl })).length;
+        return (await chrome.tabs.query({ url: targetUrl })).map((tab: chrome.tabs.Tab) => tab.groupId);
       }, server.HELLO_WORLD);
-    }).toBe(0);
+    }).toEqual([-1]);
   });
 });
